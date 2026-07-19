@@ -25,7 +25,7 @@ from .file_utils import (
     _iter_project_source_files,
     _is_under_submodules,
 )
-from .opencode_trace import run_opencode_traced
+from .backend import DEFAULT_BACKEND
 from .llm_client import build_llm_cli_command
 from .domain_knowledge import (
     format_domain_knowledge_bullets,
@@ -149,7 +149,7 @@ def _phase_source_files(phases_json):
     return result
 
 
-def _sync_domain_context(proj_dir, work_dir, changed_phases, phase_cleanup=None):
+def _sync_domain_context(proj_dir, work_dir, changed_phases, phase_cleanup=None, backend=None):
     """Re-generate the per-phase domain-context files for phases whose source-file
     composition changed after phase edits.
 
@@ -168,6 +168,7 @@ def _sync_domain_context(proj_dir, work_dir, changed_phases, phase_cleanup=None)
     file list (e.g. all its files deduplicated away) has no types to describe. An
     empty set, or no changed phase with files, skips the agent call entirely.
     """
+    backend = backend or DEFAULT_BACKEND
     phase_cleanup = phase_cleanup or {}
     removed_phases = [
         p for p in phase_cleanup.get("removed_phases", [])
@@ -210,7 +211,7 @@ def _sync_domain_context(proj_dir, work_dir, changed_phases, phase_cleanup=None)
 
     for attempt in range(1, OPENCODE_MAX_RETRIES + 1):
         try:
-            run_opencode_traced(
+            backend.run_opencode_traced(
                 proj_dir=proj_dir,
                 work_dir=work_dir,
                 command=command,
@@ -553,7 +554,7 @@ def _build_module_description_prompt(modified_modules, phases_json):
     )
 
 
-def _update_module_description(proj_dir, work_dir, modified_modules):
+def _update_module_description(proj_dir, work_dir, modified_modules, backend=None):
     """Delegate refreshing module descriptions to the agent after deduplication.
 
     ``_ensure_source_files_in_phases`` can force-add source files to a module and
@@ -567,6 +568,7 @@ def _update_module_description(proj_dir, work_dir, modified_modules):
     ``modified_modules`` is the list from ``_collect_changed_modules``; an empty
     list (no module's files changed) skips the agent call entirely.
     """
+    backend = backend or DEFAULT_BACKEND
     if not modified_modules:
         return
 
@@ -593,7 +595,7 @@ def _update_module_description(proj_dir, work_dir, modified_modules):
 
     for attempt in range(1, OPENCODE_MAX_RETRIES + 1):
         try:
-            run_opencode_traced(
+            backend.run_opencode_traced(
                 proj_dir=proj_dir,
                 work_dir=work_dir,
                 command=command,
@@ -901,8 +903,9 @@ def _prepare_workflow_file(proj_dir, work_dir, script_dir, workflow_filename):
 
 
 def _run_generate_phases(proj_dir, work_dir, script_dir, is_incremental=False,
-                         resume=False, submodules=None):
+                         resume=False, submodules=None, backend=None):
     """Stage 1: generate phase.json — input target code, output phases.json."""
+    backend = backend or DEFAULT_BACKEND
     phases_json = os.path.join(work_dir, "phases.json")
     prev_mtime = os.path.getmtime(phases_json) if os.path.exists(phases_json) else None
 
@@ -970,7 +973,7 @@ def _run_generate_phases(proj_dir, work_dir, script_dir, is_incremental=False,
             files=[prompt_file],
         )
         try:
-            run_opencode_traced(
+            backend.run_opencode_traced(
                 proj_dir=proj_dir,
                 work_dir=work_dir,
                 command=command,
@@ -1040,7 +1043,7 @@ def _run_generate_phases(proj_dir, work_dir, script_dir, is_incremental=False,
 
 
 def _post_process_phases(proj_dir, work_dir, required_source_files=None,
-                          submodules=None, one_phase=False):
+                          submodules=None, one_phase=False, backend=None):
     """Post-process phases.json: ensure required files, filter submodules,
     deduplicate, update descriptions, and clean empty phases before domain
     context generation.
@@ -1067,7 +1070,7 @@ def _post_process_phases(proj_dir, work_dir, required_source_files=None,
     changed_modules = _collect_changed_modules(
         ensure_changes, filter_changes, dedup_changes
     )
-    _update_module_description(proj_dir, work_dir, changed_modules)
+    _update_module_description(proj_dir, work_dir, changed_modules, backend=backend)
 
     cleanup_result = _clean_empty_phase_module(work_dir)
 
@@ -1088,10 +1091,11 @@ def _post_process_phases(proj_dir, work_dir, required_source_files=None,
     return phases_modified
 
 
-def _run_generate_domain_context(proj_dir, work_dir, script_dir, resume=False):
+def _run_generate_domain_context(proj_dir, work_dir, script_dir, resume=False, backend=None):
     """Stage 2: generate domain context — input phases.json, output domain context
     files for each phase.
     """
+    backend = backend or DEFAULT_BACKEND
     _resume_skip = resume and _domain_context_complete(work_dir)
     if _resume_skip:
         print("[Pipeline] Stage 2/6: RESUME — domain context files found, skipping domain context generation.")
@@ -1126,7 +1130,7 @@ def _run_generate_domain_context(proj_dir, work_dir, script_dir, resume=False):
             files=[prompt_file],
         )
         try:
-            run_opencode_traced(
+            backend.run_opencode_traced(
                 proj_dir=proj_dir,
                 work_dir=work_dir,
                 command=command,
@@ -1168,14 +1172,23 @@ def _run_generate_domain_context(proj_dir, work_dir, script_dir, resume=False):
 
 def _run_setup_extract(proj_dir, work_dir, script_dir, is_incremental=False,
                        resume=False, required_source_files=None,
-                       submodules=None, one_phase=False):
+                       submodules=None, one_phase=False, backend=None):
     """Run generate-phases, post-process, and generate-domain-context stages.
 
     Backward-compatible wrapper that calls the three sub-stages in sequence.
     """
-    _run_generate_phases(proj_dir, work_dir, script_dir, is_incremental, resume, submodules)
-    phases_modified = _post_process_phases(proj_dir, work_dir, required_source_files, submodules, one_phase=one_phase)
-    _run_generate_domain_context(proj_dir, work_dir, script_dir, resume and not phases_modified)
+    _run_generate_phases(
+        proj_dir, work_dir, script_dir, is_incremental, resume, submodules,
+        backend=backend,
+    )
+    phases_modified = _post_process_phases(
+        proj_dir, work_dir, required_source_files, submodules,
+        one_phase=one_phase, backend=backend,
+    )
+    _run_generate_domain_context(
+        proj_dir, work_dir, script_dir, resume and not phases_modified,
+        backend=backend,
+    )
 
     if not _setup_outputs_complete(work_dir):
         print(

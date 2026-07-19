@@ -1,0 +1,82 @@
+{
+  "name": "replay",
+  "fixture_dir": {
+    "env": "FM_AGENT_REPLAY_FIXTURE",
+    "default": "tests/fixtures/replay"
+  },
+  "project_src": "{fixture_dir}/src",
+  "golden": "{fixture_dir}/golden",
+  "backend": {
+    "opencode": {
+      "generate_phases_json": {
+        "materialize": [
+          {"from": "phases.json", "to": "phases.json"}
+        ]
+      },
+      "update_module_description": {
+        "materialize": [
+          {"from": "phases.json", "to": "phases.json"}
+        ]
+      },
+      "generate_domain_context": {
+        "materialize": [
+          {"from": "domain_context", "to": "spec_prompts/domain_context"}
+        ]
+      },
+      "sync_domain_context": {
+        "materialize": [
+          {"from": "domain_context", "to": "spec_prompts/domain_context"}
+        ]
+      },
+      "spec_generation": {
+        "materialize_by_function_id": {
+          "kind": "function_file",
+          "from_root": "extracted_functions",
+          "to_root": "extracted_functions"
+        }
+      },
+      "bug_validation": {
+        "materialize_by_function_id": {
+          "kind": "bug_validation",
+          "id": "bug_id",
+          "from_root": "bug_validation",
+          "to_root": "bug_validation",
+          "files": [
+            {"path": "{bug_id}.md", "optional": true},
+            {"path": "{bug_id}.result.json", "optional": true},
+            {"path": "_probe_{bug_id}.py", "optional": true}
+          ]
+        }
+      }
+    },
+    "reasoner": {
+      "results_root": "logic_verification_results"
+    }
+  },
+  "workflow": {
+    "required_stages": [
+      "generate_phases_json",
+      "generate_domain_context",
+      "spec_generation",
+      "bug_validation"
+    ],
+    "stage_calls": {
+      "spec_generation": {
+        "min": 1,
+        "requires": ["function_ids", "metadata.layer"]
+      },
+      "bug_validation": {
+        "min": 1,
+        "requires": ["function_ids"]
+      }
+    }
+  },
+  "assertions": {
+    "bug_validation_summary": {
+      "total_reported": 169,
+      "total_confirmed": 64,
+      "total_not_confirmed": 105,
+      "total_error": 0
+    }
+  }
+}

@@ -48,7 +48,7 @@ from .generate_batch_prompts import (
     extract_info_block,
     extract_spec_block,
 )
-from .opencode_trace import run_opencode_traced
+from .backend import DEFAULT_BACKEND
 from .llm_client import _llm_provider_client, _llm_json_call, build_llm_cli_command
 from .scope import _parse_issue_signals, rank_functions_in_file
 from .languages.codegraph import try_codegraph_init
@@ -672,6 +672,7 @@ def run_incremental_pipeline(
     submodules=None,
     one_phase=False,
     extra_call_edges_path=None,
+    backend=None,
 ):
     """
     Run the pipeline in incremental mode, intent_file_path is a file (absolute path) defining the goal of modification.
@@ -681,6 +682,8 @@ def run_incremental_pipeline(
     then confirmed. The set of functions whose specs were updated is recorded to
     fm_agent/incremental_updated_specs.json as a side effect.
     """
+
+    backend = backend or DEFAULT_BACKEND
 
     # run_pipeline and _run_setup_extract live in the top-level entry module (main.py);
     # import them lazily here to avoid a src -> main import cycle at module load time.
@@ -724,6 +727,7 @@ def run_incremental_pipeline(
             submodules=submodules,
             one_phase=one_phase,
             extra_call_edges_path=extra_call_edges_path,
+            backend=backend,
         )
         return
     logging.info("  -> previous full run found; proceeding with incremental analysis.")
@@ -779,6 +783,7 @@ def run_incremental_pipeline(
         proj_dir, work_dir, script_dir,
         is_incremental=True, submodules=submodules,
         one_phase=one_phase,
+        backend=backend,
     )
     logging.info("  -> phases.json regenerated.")
 
@@ -841,7 +846,9 @@ def run_incremental_pipeline(
 
     # 8. Collect the scope of functions relevant to the developer intent (the intent file defines the goal of modification).
     logging.info("[Stage 8/10] Collecting functions relevant to the developer intent...")
-    spec_files = collect_relevent_function_scope(proj_dir, developer_intent, changed_functions)
+    spec_files = collect_relevent_function_scope(
+        proj_dir, developer_intent, changed_functions, backend=backend
+    )
     logging.info("  -> %d function(s) judged relevant to the intent.", len(spec_files))
 
     # 9. Re-generate the spec of functions if it satisfies one of the following conditions: 1) the function is changed; 2) the function is relevant to the developer intent.
@@ -853,6 +860,7 @@ def run_incremental_pipeline(
         changed_functions,
         spec_files,
         extra_call_edges=extra_call_edges,
+        backend=backend,
     )
     record_path = os.path.join(work_dir, "incremental_updated_specs.json")
     with open(record_path, "w") as f:
@@ -867,6 +875,7 @@ def run_incremental_pipeline(
     buggy_files = _verify_incremental_functions(
         proj_dir, work_dir, changed_functions, updated_spec_files,
         submodules=submodules,
+        backend=backend,
     )
     logging.info("=" * 70)
     logging.info(
@@ -902,7 +911,7 @@ def _extracted_func_dir(extracted_base, src_rel):
 
 
 def _opencode_select_json(proj_dir, work_dir, prompt_relpath, prompt_content,
-                          result_relpath, stage, input_files):
+                          result_relpath, stage, input_files, backend=None):
     """
     Run opencode to produce a JSON artifact and return the parsed JSON.
 
@@ -913,6 +922,7 @@ def _opencode_select_json(proj_dir, work_dir, prompt_relpath, prompt_content,
     artifact or it could not be parsed. Shared by the module- and file-selection steps of
     collect_relevent_function_scope.
     """
+    backend = backend or DEFAULT_BACKEND
     prompt_path = os.path.join(proj_dir, prompt_relpath)
     result_path = os.path.join(proj_dir, result_relpath)
     if os.path.exists(result_path):
@@ -934,7 +944,7 @@ def _opencode_select_json(proj_dir, work_dir, prompt_relpath, prompt_content,
     produced = False
     for attempt in range(1, OPENCODE_MAX_RETRIES + 1):
         try:
-            run_opencode_traced(
+            backend.run_opencode_traced(
                 proj_dir=proj_dir,
                 work_dir=work_dir,
                 command=command,
@@ -1067,7 +1077,9 @@ def _domain_knowledge_prompt_section(work_dir):
     return f"## User-provided domain knowledge\n\n{text}\n\n" if text else ""
 
 
-def collect_relevent_function_scope(proj_dir, developer_intent, changed_functions, range=None):
+def collect_relevent_function_scope(
+    proj_dir, developer_intent, changed_functions, range=None, backend=None
+):
     """
     Select the functions relevant to developer_intent and return the most relevant ones.
 
@@ -1092,6 +1104,7 @@ def collect_relevent_function_scope(proj_dir, developer_intent, changed_function
     relevance score and truncated to the first `range` entries. Returns an empty list when
     phases.json has no modules or opencode selects none / fails to produce a result.
     """
+    backend = backend or DEFAULT_BACKEND
     work_dir = os.path.join(proj_dir, "fm_agent")
     extracted_dir = os.path.join(work_dir, "extracted_functions")
 
@@ -1215,6 +1228,7 @@ def collect_relevent_function_scope(proj_dir, developer_intent, changed_function
             os.path.join("fm_agent", f"relevant_files_{idx}.json"),
             stage="select_relevant_files",
             input_files=[f"fm_agent/select_relevant_files_{idx}.md", *source_files],
+            backend=backend,
         )
 
         if isinstance(file_selection, list):
@@ -1551,7 +1565,8 @@ def _collect_caller_context(fqn, callers_map, file_map, edge_aliases_map=None):
 
 
 def _opencode_generate_spec(proj_dir, work_dir, idx, fqn, lang_key, comment_prefix,
-                            developer_intent, callee_names, source, caller_context):
+                            developer_intent, callee_names, source, caller_context,
+                            backend=None):
     """
     Ask opencode to generate a brand-new [SPEC] (and, when the function has callees, [INFO])
     block from scratch for a function that has no existing specification — e.g. a function
@@ -1659,6 +1674,7 @@ def _opencode_generate_spec(proj_dir, work_dir, idx, fqn, lang_key, comment_pref
             "fm_agent/spec_prompts/system_prompt.md",
             *user_knowledge_paths,
         ],
+        backend=backend,
     )
 
 
@@ -1669,6 +1685,7 @@ def _update_specs_for_intent(
     changed_functions,
     relevant_rel_files,
     extra_call_edges=None,
+    backend=None,
 ):
     """
     re-generate the [SPEC] (and dependent [INFO]) blocks of every function that is
@@ -1692,6 +1709,7 @@ def _update_specs_for_intent(
     Returns the sorted list of extracted-function files (paths relative to the
     extracted_functions dir) whose [SPEC]/[INFO] block was changed.
     """
+    backend = backend or DEFAULT_BACKEND
     extracted_dir = os.path.join(work_dir, "extracted_functions")
 
     callees_map, callers_map, file_map, edge_aliases_map = _project_call_graph(
@@ -1762,6 +1780,7 @@ def _update_specs_for_intent(
             result = _opencode_generate_spec(
                 proj_dir, work_dir, idx, fqn, lang_key, comment_prefix,
                 developer_intent, callee_names, source, caller_context,
+                backend=backend,
             )
         else:
             source = content[len(leading):]
@@ -1963,7 +1982,8 @@ def _update_specs_for_intent(
 
 
 def _verify_incremental_functions(
-    proj_dir, work_dir, changed_functions, updated_spec_files, submodules=None
+    proj_dir, work_dir, changed_functions, updated_spec_files, submodules=None,
+    backend=None,
 ):
     """
     Step 10: re-run the verification stage (reasoner + bug validation) on only the functions
@@ -1991,6 +2011,7 @@ def _verify_incremental_functions(
     Returns the sorted list of extracted-function files (paths relative to the
     extracted_functions dir) whose reasoner MISMATCH was confirmed a bug by bug validation.
     """
+    backend = backend or DEFAULT_BACKEND
     extracted_dir = os.path.join(work_dir, "extracted_functions")
     output_dir = os.path.join(work_dir, "logic_verification_results")
 
@@ -2041,7 +2062,10 @@ def _verify_incremental_functions(
     def _verify(rel):
         fpath = os.path.join(extracted_dir, rel)
         language = _VERIFY_EXT_TO_LANG.get(os.path.splitext(fpath)[1], "C")
-        _, verdict = _verify_single_file(fpath, extracted_dir, output_dir, language, work_dir=work_dir)
+        _, verdict = _verify_single_file(
+            fpath, extracted_dir, output_dir, language,
+            work_dir=work_dir, backend=backend,
+        )
         return rel, verdict
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -2070,7 +2094,7 @@ def _verify_incremental_functions(
             os.path.relpath(output_dir, proj_dir),
             os.path.splitext(rel)[0] + ".json",
         )
-        _validate_single_bug(result_json_rel, proj_dir, work_dir)
+        _validate_single_bug(result_json_rel, proj_dir, work_dir, backend=backend)
         return rel
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:

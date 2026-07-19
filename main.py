@@ -21,8 +21,8 @@ from src.extract import run_extraction, EXT_TO_LANG
 from src.generate_topdown_layers import generate_topdown_layers
 from src.opencode_trace import (
     function_id_from_extracted_path,
-    run_opencode_traced,
 )
+from src.backend import DEFAULT_BACKEND
 from src.llm_client import build_llm_cli_command
 from src.incremental_reasoner import run_incremental_pipeline
 from src.git import (
@@ -118,7 +118,9 @@ def _run_spec_generation_batch(
     layer_idx,
     batch_rel_dir,
     batch_info,
+    backend=None,
 ):
+    backend = backend or DEFAULT_BACKEND
     # Run one batch end-to-end so the executor can refill slots as soon as a
     # batch finishes, instead of waiting for a whole chunk barrier.
     batch_file = batch_info["file"]
@@ -153,7 +155,7 @@ def _run_spec_generation_batch(
         files=[prompt_file],
     )
     try:
-        result = run_opencode_traced(
+        result = backend.run_opencode_traced(
             proj_dir=proj_dir,
             work_dir=work_dir,
             command=command,
@@ -188,7 +190,9 @@ def run_pipeline(
     one_phase=False,
     extra_call_edges_path=None,
     only_spec=False,
+    backend=None,
 ):
+    backend = backend or DEFAULT_BACKEND
     if not os.path.isdir(proj_dir):
         print(f"[Pipeline] ERROR: proj_dir does not exist or is not a directory: {proj_dir}")
         sys.exit(1)
@@ -231,6 +235,7 @@ def run_pipeline(
     _run_generate_phases(
         proj_dir, work_dir, script_dir, resume=resume,
         submodules=submodules,
+        backend=backend,
     )
 
     phases_modified = _post_process_phases(
@@ -238,10 +243,15 @@ def run_pipeline(
         required_source_files=required_source_files,
         submodules=submodules,
         one_phase=one_phase,
+        backend=backend,
     )
 
     print("[Pipeline] Stage 2/6: Generating domain context...")
-    _run_generate_domain_context(proj_dir, work_dir, script_dir, resume=resume and not phases_modified)
+    _run_generate_domain_context(
+        proj_dir, work_dir, script_dir,
+        resume=resume and not phases_modified,
+        backend=backend,
+    )
 
     # Build (or rebuild) the codegraph index if codegraph is installed. Both
     # run_extraction (Stage 3) and generate_topdown_layers (Stage 5) read from it.
@@ -383,6 +393,7 @@ def run_pipeline(
                                 spec_procs=None,
                                 already_processed=all_processed | layer_processed,
                                 resume=resume,
+                                backend=backend,
                             )
                             layer_processed.update(newly_processed)
                     break
@@ -411,6 +422,7 @@ def run_pipeline(
                                 layer_idx,
                                 batch_rel_dir,
                                 batch_info,
+                                backend,
                             )
                         )
 
@@ -426,6 +438,7 @@ def run_pipeline(
                             spec_procs=spec_futures,
                             already_processed=all_processed | layer_processed,
                             resume=resume,
+                            backend=backend,
                         )
                         layer_processed.update(newly_processed)
 
@@ -434,6 +447,26 @@ def run_pipeline(
                             future.result()
                         except Exception as exc:
                             logging.error(f"Spec generation task failed unexpectedly: {exc}")
+
+                    if spec_futures and not only_spec:
+                        incomplete_verification = _get_incomplete_verification_files(
+                            layer_files, input_dir, output_dir, work_dir
+                        )
+                        if incomplete_verification:
+                            logging.info(
+                                f"Phase {phase_num} Layer {layer_idx}: "
+                                f"draining {len(incomplete_verification)} ready file(s) "
+                                f"after spec-generation tasks completed"
+                            )
+                            newly_processed = streaming_reasoner(
+                                input_dir, output_dir, file_list=layer_files,
+                                proj_dir=proj_dir, work_dir=work_dir,
+                                spec_procs=None,
+                                already_processed=all_processed | layer_processed,
+                                resume=resume,
+                                backend=backend,
+                            )
+                            layer_processed.update(newly_processed)
 
                 # Check if any files in this layer received specs
                 specs_generated = sum(

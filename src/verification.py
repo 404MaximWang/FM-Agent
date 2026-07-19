@@ -1,9 +1,10 @@
 import config
 from config import MAX_WORKERS, OPENCODE_BUG_VALIDATION_MODEL
 from .parser import parse_input_function
-from .reasoner import reasoner, _parse_spec_conditions, _sanitize_strings
+from .reasoner import _parse_spec_conditions, _sanitize_strings
 from .file_utils import is_file_ready
-from .opencode_trace import function_id_from_result_path, run_opencode_traced
+from .opencode_trace import function_id_from_result_path
+from .backend import DEFAULT_BACKEND
 from .llm_client import build_llm_cli_command
 from .domain_knowledge import (
     format_domain_knowledge_bullets,
@@ -61,8 +62,9 @@ def _spec_task_exit_code(handle):
     return None
 
 
-def streaming_reasoner(input_dir, output_dir, file_list=None, proj_dir=None, work_dir=None, poll_interval=2, spec_procs=None, already_processed=None, resume=False):
+def streaming_reasoner(input_dir, output_dir, file_list=None, proj_dir=None, work_dir=None, poll_interval=2, spec_procs=None, already_processed=None, resume=False, backend=None):
     """Continuously watch input_dir for ready files, verify them, and validate bugs."""
+    backend = backend or DEFAULT_BACKEND
     if work_dir is None:
         work_dir = proj_dir
     os.makedirs(output_dir, exist_ok=True)
@@ -126,7 +128,8 @@ def streaming_reasoner(input_dir, output_dir, file_list=None, proj_dir=None, wor
                         submitted.add(file_path)
                         language = EXT_TO_LANG.get(ext, "C")
                         future = executor.submit(
-                            _verify_single_file, file_path, input_dir, output_dir, language, work_dir, resume
+                            _verify_single_file, file_path, input_dir, output_dir,
+                            language, work_dir, resume, backend
                         )
                         reasoning_futures[future] = file_path
                         logging.info(f"Submitted: {file_path}")
@@ -149,7 +152,8 @@ def streaming_reasoner(input_dir, output_dir, file_list=None, proj_dir=None, wor
                                 os.path.splitext(rel)[0] + ".json",
                             )
                             vf = executor.submit(
-                                _validate_single_bug, result_json_rel, proj_dir, work_dir, resume
+                                _validate_single_bug, result_json_rel, proj_dir,
+                                work_dir, resume, backend
                             )
                             validation_futures[vf] = (fpath, rel_path, result_json_rel, completed_count)
                             logging.info(f"Submitted validation: {fpath}")
@@ -249,8 +253,9 @@ def streaming_reasoner(input_dir, output_dir, file_list=None, proj_dir=None, wor
     return processed
 
 
-def _verify_single_file(file_path, input_dir, output_dir, language, work_dir=None, resume=False):
+def _verify_single_file(file_path, input_dir, output_dir, language, work_dir=None, resume=False, backend=None):
     """Verify a single file and write the result JSON."""
+    backend = backend or DEFAULT_BACKEND
     # Skip if resuming and a valid result already exists
     rel = os.path.relpath(file_path, input_dir)
     output_path = os.path.join(output_dir, os.path.splitext(rel)[0] + ".json")
@@ -283,7 +288,7 @@ def _verify_single_file(file_path, input_dir, output_dir, language, work_dir=Non
         domain_knowledge = load_staged_domain_knowledge_text(work_dir) if work_dir else ""
         if domain_knowledge:
             knowledge = f"{knowledge}\n\n{domain_knowledge}" if knowledge else domain_knowledge
-        result = reasoner(func, spec, knowledge, language, trace_context=trace_context)
+        result = backend.reasoner(func, spec, knowledge, language, trace_context=trace_context)
 
         if "passes the verification" in result:
             output = {"function": file_path, "verdict": "MATCH", "gaps": None}
@@ -327,8 +332,9 @@ def _verify_single_file(file_path, input_dir, output_dir, language, work_dir=Non
     return file_path, output["verdict"]
 
 
-def _validate_single_bug(result_json_rel, proj_dir, work_dir=None, resume=False):
+def _validate_single_bug(result_json_rel, proj_dir, work_dir=None, resume=False, backend=None):
     """Validate a single MISMATCH result by running opencode with a per-file prompt."""
+    backend = backend or DEFAULT_BACKEND
     if work_dir is None:
         work_dir = proj_dir
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -405,7 +411,7 @@ def _validate_single_bug(result_json_rel, proj_dir, work_dir=None, resume=False)
         for attempt in range(1, max_attempts + 1):
             run_failed = False
             try:
-                run_opencode_traced(
+                backend.run_opencode_traced(
                     proj_dir=proj_dir,
                     work_dir=work_dir,
                     command=command,
