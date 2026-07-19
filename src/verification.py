@@ -8,7 +8,9 @@ from .backend import DEFAULT_BACKEND
 from .llm_client import build_llm_cli_command
 from .domain_knowledge import (
     format_domain_knowledge_bullets,
+    list_generated_domain_context_relpaths,
     list_staged_domain_knowledge_relpaths,
+    load_generated_domain_context_text,
     load_staged_domain_knowledge_text,
 )
 import os
@@ -286,6 +288,12 @@ def _verify_single_file(file_path, input_dir, output_dir, language, work_dir=Non
                 "function_file": os.path.join("extracted_functions", rel_function).replace(os.sep, "/"),
             }
         domain_knowledge = load_staged_domain_knowledge_text(work_dir) if work_dir else ""
+        generated_context = (
+            load_generated_domain_context_text(work_dir, rel_function)
+            if work_dir else ""
+        )
+        if generated_context:
+            knowledge = f"{knowledge}\n\n{generated_context}" if knowledge else generated_context
         if domain_knowledge:
             knowledge = f"{knowledge}\n\n{domain_knowledge}" if knowledge else domain_knowledge
         result = backend.reasoner(func, spec, knowledge, language, trace_context=trace_context)
@@ -355,7 +363,20 @@ def _validate_single_bug(result_json_rel, proj_dir, work_dir=None, resume=False,
     with open(base_md_path, "r") as f:
         base_content = f.read()
 
+    generated_context_paths = list_generated_domain_context_relpaths(
+        work_dir,
+        result_json_rel,
+    )
     user_knowledge_paths = list_staged_domain_knowledge_relpaths(work_dir)
+    if generated_context_paths:
+        generated_context_section = (
+            "## Generated Domain Context\n\n"
+            "Read these setup-generated context files before validating the "
+            "candidate bug:\n\n"
+            f"{format_domain_knowledge_bullets(generated_context_paths)}\n\n---\n\n"
+        )
+    else:
+        generated_context_section = ""
     if user_knowledge_paths:
         user_knowledge_section = (
             "## User-Provided Domain Knowledge\n\n"
@@ -372,6 +393,7 @@ def _validate_single_bug(result_json_rel, proj_dir, work_dir=None, resume=False,
         "# Bug Validator\n\n"
         f"**Target result file:** `{result_json_rel}`\n"
         f"**Bug ID:** `{bug_id}`\n\n---\n\n"
+        + generated_context_section
         + user_knowledge_section
         + base_content
     )
@@ -420,6 +442,7 @@ def _validate_single_bug(result_json_rel, proj_dir, work_dir=None, resume=False,
                     input_files=[
                         prompt_filename,
                         result_json_rel,
+                        *generated_context_paths,
                         *user_knowledge_paths,
                     ],
                     output_files=[

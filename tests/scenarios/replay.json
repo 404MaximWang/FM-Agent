@@ -8,14 +8,10 @@
   "golden": "{fixture_dir}/golden",
   "backend": {
     "opencode": {
-      "generate_phases_json": {
+      "generate_source_manifest": {
         "materialize": [
-          {"from": "phases.json", "to": "phases.json"}
-        ]
-      },
-      "update_module_description": {
-        "materialize": [
-          {"from": "phases.json", "to": "phases.json"}
+          {"from": "source_files.json", "to": "source_files.json"},
+          {"from": "modules.json", "to": "modules.json"}
         ]
       },
       "generate_domain_context": {
@@ -55,7 +51,7 @@
   },
   "workflow": {
     "required_stages": [
-      "generate_phases_json",
+      "generate_source_manifest",
       "generate_domain_context",
       "spec_generation",
       "bug_validation"

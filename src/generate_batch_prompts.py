@@ -57,8 +57,7 @@ COMMENT_PREFIX_BY_LANG = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate spec batch prompts for one phase/layer range.")
-    parser.add_argument("--phase", type=int, required=True, help="Phase number, e.g. 3")
+    parser = argparse.ArgumentParser(description="Generate spec batch prompts for one global layer range.")
     parser.add_argument("--layers", required=True, help="Layer index or inclusive range, e.g. 0 or 0-5")
     parser.add_argument("--batch-size", type=int, default=2, help="Functions per prompt file")
     parser.add_argument("--output-dir", default=None, help="Output directory for batch prompt files")
@@ -193,26 +192,6 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def phase_callers_key(func: dict, phase: int) -> str:
-    target = f"phase{phase}_callers"
-    if target in func:
-        return target
-    for key in func.keys():
-        if key.endswith("_callers") and key.startswith("phase"):
-            return key
-    return target
-
-
-def phase_callee_info_names_key(func: dict, phase: int) -> Optional[str]:
-    target = f"phase{phase}_callee_info_names_by_caller"
-    if target in func:
-        return target
-    for key in func.keys():
-        if key.endswith("_callee_info_names_by_caller") and key.startswith("phase"):
-            return key
-    return None
-
-
 def detect_lang_and_comment(file_rel: str, ext_to_lang: Dict[str, str]) -> Tuple[str, str]:
     ext = Path(file_rel).suffix.lstrip(".").lower()
     lang = ext_to_lang.get(ext, ext if ext else "unknown")
@@ -220,8 +199,17 @@ def detect_lang_and_comment(file_rel: str, ext_to_lang: Dict[str, str]) -> Tuple
     return lang, comment
 
 
+def _module_descriptions(modules_json: dict) -> Dict[str, str]:
+    descriptions = {}
+    for module in modules_json.get("modules", []):
+        name = module.get("name")
+        if not name:
+            continue
+        descriptions[name] = (module.get("description") or "").strip()
+    return descriptions
+
+
 def build_prompt(
-    phase: int,
     layer_idx: int,
     is_cycle: bool,
     functions: List[dict],
@@ -230,6 +218,7 @@ def build_prompt(
     work_dir: Path,
     fm_agent_prefix: str,
     ext_to_lang: Dict[str, str],
+    module_descriptions: Dict[str, str],
 ) -> str:
     lines: List[str] = []
     sample_lang = "unknown"
@@ -237,7 +226,7 @@ def build_prompt(
     if functions:
         sample_lang, sample_comment = detect_lang_and_comment(functions[0]["file"], ext_to_lang)
 
-    lines.append(f"You are generating behavioral specifications for Phase {phase}, Layer {layer_idx}.")
+    lines.append(f"You are generating behavioral specifications for global Layer {layer_idx}.")
     lines.append("")
     lines.append(
         f"Language: {sample_lang}. Spec comment style: `{sample_comment} [SPEC]`."
@@ -245,7 +234,16 @@ def build_prompt(
     lines.append("")
     lines.append(f"Read {fm_agent_prefix}spec_prompts/system_prompt.md FIRST for the mandatory spec format rules.")
     lines.append(f"Read: {fm_agent_prefix}spec_prompts/domain_context/engine_overview.txt")
-    lines.append(f"Read: {fm_agent_prefix}spec_prompts/domain_context/phase_{phase:02d}_types.txt")
+    module_types_dir = work_dir / "spec_prompts" / "domain_context" / "module_types"
+    if (work_dir / "spec_prompts" / "domain_context" / "types.txt").exists():
+        lines.append(f"Read: {fm_agent_prefix}spec_prompts/domain_context/types.txt")
+    elif module_types_dir.is_dir():
+        module_names = sorted({fn.get("unit", "") for fn in functions if fn.get("unit")})
+        for module_name in module_names:
+            lines.append(
+                f"Read if present: "
+                f"{fm_agent_prefix}spec_prompts/domain_context/module_types/{module_name}.txt"
+            )
     user_knowledge_paths = list_staged_domain_knowledge_relpaths(
         work_dir,
         prefix=fm_agent_prefix.rstrip("/"),
@@ -254,6 +252,17 @@ def build_prompt(
         lines.append("Read these user-provided domain knowledge Markdown files:")
         for path in user_knowledge_paths:
             lines.append(f"- {path}")
+    module_names = sorted({fn.get("unit", "") for fn in functions if fn.get("unit")})
+    if module_names:
+        lines.append("")
+        lines.append("## MODULE CONTEXT")
+        for module_name in module_names:
+            description = module_descriptions.get(module_name, "").strip()
+            lines.append(f"### {module_name}")
+            if description:
+                lines.append(description)
+            else:
+                lines.append("(No module description was provided.)")
     lines.append("")
     lines.append("## KEY RULES")
     lines.append("- Describe WHAT the function guarantees, NOT HOW it implements it")
@@ -266,10 +275,8 @@ def build_prompt(
     caller_expectations: Dict[str, List[Tuple[str, str]]] = {}
     for fn in functions:
         fn_name = fn["name"]
-        caller_key = phase_callers_key(fn, phase)
-        info_names_key = phase_callee_info_names_key(fn, phase)
-        info_names_by_caller = fn.get(info_names_key, {}) if info_names_key else {}
-        callers = fn.get(caller_key, [])
+        info_names_by_caller = fn.get("callee_info_names_by_caller", {})
+        callers = fn.get("callers", [])
         for caller_name in callers:
             caller_layer = func_to_layer.get(caller_name)
             if caller_layer is None or caller_layer >= layer_idx:
@@ -328,8 +335,7 @@ def build_prompt(
     lines.append(f"## FUNCTIONS ({len(functions)} total - process ALL)")
     for idx, fn in enumerate(functions, start=1):
         fn_name = fn["name"]
-        caller_key = phase_callers_key(fn, phase)
-        callers = fn.get(caller_key, [])
+        callers = fn.get("callers", [])
         earlier = [c for c in callers if func_to_layer.get(c, 10**9) < layer_idx]
         lines.append(f"### {idx}. {fm_agent_prefix}{fn['file']}")
         if earlier:
@@ -387,13 +393,20 @@ def main() -> int:
     repo_root = work_dir.parent
     fm_agent_prefix = str(work_dir.relative_to(repo_root)) + "/"
 
-    phases_json = read_json(work_dir / "phases.json")
-    project = phases_json["project"]
-    languages = phases_json.get("languages", [])
-    exts = phases_json.get("file_extensions", [])
-    ext_to_lang = {ext.lower().lstrip("."): lang for ext, lang in zip(exts, languages)}
+    modules_json = read_json(work_dir / "modules.json")
+    project = modules_json["project"]
+    exts = modules_json.get("file_extensions", [])
+    try:
+        from src.extract import EXT_TO_LANG
+    except ImportError:
+        EXT_TO_LANG = {}
+    ext_to_lang = {
+        ext.lower().lstrip("."): EXT_TO_LANG.get(ext.lower().lstrip("."), ext)
+        for ext in exts
+    }
+    module_descriptions = _module_descriptions(modules_json)
 
-    topdown_path = work_dir / "spec_prompts" / f"phase_{args.phase:02d}_topdown_layers.json"
+    topdown_path = work_dir / "spec_prompts" / "topdown_layers.json"
     topdown = read_json(topdown_path)
     layers = topdown.get("layers", [])
     total_layers = len(layers)
@@ -402,7 +415,7 @@ def main() -> int:
         raise ValueError(f"layer range {args.layers} out of bounds [0, {total_layers - 1}]")
 
     output_dir = Path(args.output_dir) if args.output_dir else (
-        work_dir / "spec_prompts" / f"batch_prompts_{project}_phase{args.phase:02d}"
+        work_dir / "spec_prompts" / f"batch_prompts_{project}"
     )
 
     func_to_layer: Dict[str, int] = {}
@@ -448,7 +461,6 @@ def main() -> int:
             # unspecced functions (see _get_pending_batches).
             if prompt_funcs:
                 content = build_prompt(
-                    args.phase,
                     layer_idx,
                     is_cycle,
                     prompt_funcs,
@@ -457,6 +469,7 @@ def main() -> int:
                     work_dir,
                     fm_agent_prefix,
                     ext_to_lang,
+                    module_descriptions,
                 )
                 write_targets.append((out_path, content))
             else:
@@ -471,13 +484,15 @@ def main() -> int:
                     "is_cycle": is_cycle,
                     "num_functions": len(fn_batch),
                     "num_pending": len(prompt_funcs),
+                    "module_names": sorted(
+                        {fn.get("unit", "") for fn in fn_batch if fn.get("unit")}
+                    ),
                     "functions": [f"{fm_agent_prefix}{fn['file']}" for fn in fn_batch],
                 }
             )
             batch_index += 1
 
     manifest = {
-        "phase": args.phase,
         "layers": args.layers,
         "total_functions": total_functions,
         "total_batches": len(manifest_batches),
@@ -486,7 +501,7 @@ def main() -> int:
 
     if args.dry_run:
         print(
-            f"[dry-run] phase={args.phase} layers={args.layers} "
+            f"[dry-run] layers={args.layers} "
             f"functions={total_functions} batches={len(manifest_batches)}"
             + (f" skipped={skipped_functions} (already specced)" if args.resume else "")
         )
@@ -505,8 +520,8 @@ def main() -> int:
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
     print(
-        f"Generated {len(manifest_batches)} batch prompt(s) for phase {args.phase} "
-        f"layers {args.layers} in {output_dir}"
+        f"Generated {len(manifest_batches)} batch prompt(s) for layers "
+        f"{args.layers} in {output_dir}"
         + (f" (skipped {skipped_functions} already-specced function(s))" if args.resume else "")
     )
     return 0

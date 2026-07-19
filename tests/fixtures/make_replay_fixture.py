@@ -10,6 +10,7 @@ or FM_AGENT_REPLAY_FIXTURE can point tests at a different fixture directory.
 """
 
 import os
+import json
 import shutil
 from pathlib import Path
 
@@ -38,17 +39,58 @@ def main():
     if FIXTURE_SRC.exists():
         shutil.rmtree(FIXTURE_SRC)
 
-    # Phase plan and setup outputs.
-    shutil.copy2(TRACE / "phases.json", FIXTURE / "phases.json")
+    # Source/module manifests derived from the legacy phase trace.
+    phases = json.loads((TRACE / "phases.json").read_text(encoding="utf-8"))
+    source_files = []
+    modules = []
+    seen = set()
+    for phase in phases.get("phases", []):
+        for module in phase.get("modules", []):
+            module_files = []
+            for source_file in module.get("source_files", []):
+                if source_file in seen:
+                    continue
+                seen.add(source_file)
+                source_files.append(source_file)
+                module_files.append(source_file)
+            if module_files:
+                name = module.get("name", "module")
+                description = (module.get("description") or "").strip()
+                modules.append(
+                    {
+                        "name": name,
+                        "description": description or f"Source files grouped under the {name} module.",
+                        "source_files": module_files,
+                    }
+                )
+    metadata = {
+        "project": phases.get("project", PROJECT_SRC.name),
+        "languages": phases.get("languages", []),
+        "file_extensions": phases.get("file_extensions", []),
+    }
+    (FIXTURE / "source_files.json").write_text(
+        json.dumps({**metadata, "source_files": source_files}, indent=2),
+        encoding="utf-8",
+    )
+    (FIXTURE / "modules.json").write_text(
+        json.dumps({**metadata, "modules": modules}, indent=2),
+        encoding="utf-8",
+    )
 
     # Spec generation outputs: extracted functions now contain [SPEC]/[INFO].
     shutil.copytree(TRACE / "extracted_functions", FIXTURE / "extracted_functions")
 
     # Domain context files produced by setup.
-    shutil.copytree(
-        TRACE / "spec_prompts" / "domain_context",
-        FIXTURE / "domain_context",
-    )
+    domain_dst = FIXTURE / "domain_context"
+    domain_dst.mkdir(parents=True)
+    domain_src = TRACE / "spec_prompts" / "domain_context"
+    shutil.copy2(domain_src / "engine_overview.txt", domain_dst / "engine_overview.txt")
+    type_chunks = []
+    for path in sorted(domain_src.glob("phase_*_types.txt")):
+        text = path.read_text(encoding="utf-8").strip()
+        if text:
+            type_chunks.append(text)
+    (domain_dst / "types.txt").write_text("\n\n".join(type_chunks) + "\n", encoding="utf-8")
 
     # Verification outputs.
     shutil.copytree(

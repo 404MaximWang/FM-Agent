@@ -53,7 +53,7 @@ The [website](http://fm-agent.ai/) of FM-Agent provides an online service for re
 ### Requirements
 
 - Ubuntu (22.04 LTS, 24.04 LTS is tested)
-- Python 3.12
+- Python 3.10
 - pip >= 23
 - [openai](https://pypi.org/project/openai/) 2.15.0
 - [OpenCode](https://github.com/opencode-ai/opencode) 1.4.6
@@ -84,7 +84,7 @@ The following macOS environment has been tested with the install script:
 
 Set the LLM API key used by both FM-Agent and OpenCode. We recommend [OpenRouter](https://openrouter.ai/): FM-Agent invokes LLMs concurrently, and OpenRouter is generous on RPM (requests per minute) and TPM (tokens per minute) — but any compatible provider works.
 
-Put your API key in `.env` (gitignored, loaded automatically via python-dotenv); every other setting has a committed default in `fm-agent.toml`. Copy the template:
+Create a `.env` file in the project root (FM-Agent loads it automatically via python-dotenv). Copy the template and fill in your key:
 
 ```bash
 cp .env.example .env
@@ -92,11 +92,18 @@ cp .env.example .env
 ```
 
 ```bash
-# .env  (secret only)
+# .env
 LLM_API_KEY=your-api-key-here
+LLM_API_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=anthropic/claude-sonnet-4.6
+LLM_EFFORT=
+FM_AGENT_MODEL_BACKEND=opencode
+OPENCODE_MODEL_PROVIDER=openrouter
+# Optional: os.pathsep-separated Markdown files with project/domain knowledge
+FM_AGENT_DOMAIN_KNOWLEDGE=
 ```
 
-Non-secret settings — model, endpoint, backend, provider, etc. — live in `fm-agent.toml` under `[llm]`. Edit them there for a permanent change. To override without touching the committed file — e.g. on a git clone you update with `git pull` — set the matching environment variable in `.env` or your shell. Precedence is `env > .env > fm-agent.toml`; because `.env` wins over the toml, a stale value there overrides a later toml edit, so check `.env` first if a change isn't taking effect. See [docs/config_llm.md](docs/config_llm.md) for details and OpenCode provider setup.
+See [docs/config_llm.md](docs/config_llm.md) for OpenCode provider configuration and optional prompt-cache setup.
 
 Then, all of the above dependencies (except Ubuntu and Python) can be installed via the provided script:
 
