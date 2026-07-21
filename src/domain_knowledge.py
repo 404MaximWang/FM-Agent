@@ -177,6 +177,13 @@ def format_domain_knowledge_bullets(relpaths):
     return "\n".join(f"- `{path}`" for path in relpaths)
 
 
+def module_type_filename(module_name):
+    """Return the canonical module_types filename for a module name."""
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(module_name or "module"))
+    stem = stem.strip("._-") or "module"
+    return f"{stem}.txt"
+
+
 def _source_file_to_extracted_dir(source_file):
     source_file = source_file.replace("\\", "/").strip("/")
     src_dir = os.path.dirname(source_file).replace(os.sep, "/")
@@ -238,7 +245,10 @@ def list_generated_domain_context_relpaths(work_dir, artifact_relpath=None, pref
         module_name = _module_name_for_artifact(work_dir, artifact_relpath)
         if module_name:
             module_type_rel = os.path.join(
-                "spec_prompts", "domain_context", "module_types", f"{module_name}.txt"
+                "spec_prompts",
+                "domain_context",
+                "module_types",
+                module_type_filename(module_name),
             )
             if os.path.isfile(os.path.join(work_dir, module_type_rel)):
                 relpaths.append(module_type_rel.replace(os.sep, "/"))

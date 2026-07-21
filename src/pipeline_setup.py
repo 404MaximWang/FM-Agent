@@ -15,6 +15,7 @@ from .backend import DEFAULT_BACKEND
 from .domain_knowledge import (
     format_domain_knowledge_bullets,
     list_staged_domain_knowledge_relpaths,
+    module_type_filename,
 )
 from .file_utils import (
     _is_test_file,
@@ -136,7 +137,7 @@ def _domain_context_complete(work_dir):
     if not os.path.isdir(module_types):
         return False
     return all(
-        os.path.exists(os.path.join(module_types, f"{module_name}.txt"))
+        os.path.exists(os.path.join(module_types, module_type_filename(module_name)))
         for module_name in module_names
     )
 

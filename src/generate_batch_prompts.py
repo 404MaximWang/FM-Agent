@@ -10,11 +10,19 @@ from typing import Dict, List, Optional, Sequence, Tuple
 try:
     # When imported as part of the src package (e.g. incremental_reasoner).
     from .file_utils import is_file_ready
-    from .domain_knowledge import list_staged_domain_knowledge_relpaths
+    from .domain_knowledge import (
+        list_staged_domain_knowledge_relpaths,
+        module_type_filename,
+    )
 except ImportError:
     # When run standalone after being copied into fm_agent/spec_prompts/,
     # where file_utils.py sits beside this script.
     from file_utils import is_file_ready
+
+    def module_type_filename(module_name):
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(module_name or "module"))
+        stem = stem.strip("._-") or "module"
+        return f"{stem}.txt"
 
     def list_staged_domain_knowledge_relpaths(work_dir, prefix="fm_agent"):
         knowledge_dir = Path(work_dir) / "spec_prompts" / "domain_context" / "user_knowledge"
@@ -242,7 +250,8 @@ def build_prompt(
         for module_name in module_names:
             lines.append(
                 f"Read if present: "
-                f"{fm_agent_prefix}spec_prompts/domain_context/module_types/{module_name}.txt"
+                f"{fm_agent_prefix}spec_prompts/domain_context/module_types/"
+                f"{module_type_filename(module_name)}"
             )
     user_knowledge_paths = list_staged_domain_knowledge_relpaths(
         work_dir,

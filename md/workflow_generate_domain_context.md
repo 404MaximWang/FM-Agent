@@ -7,7 +7,7 @@
 Required outputs:
 
 1. `fm_agent/spec_prompts/domain_context/engine_overview.txt`
-2. Either `fm_agent/spec_prompts/domain_context/types.txt` for smaller projects, or `fm_agent/spec_prompts/domain_context/module_types/<module>.txt` for larger projects
+2. Either `fm_agent/spec_prompts/domain_context/types.txt` for smaller projects, or `fm_agent/spec_prompts/domain_context/module_types/<module_slug>.txt` for larger projects
 
 Rules:
 
@@ -41,7 +41,13 @@ Describe the overall system:
 
 ### Write Module or Global Type Context
 
-For smaller projects, write one `types.txt`. For larger projects, write one file per module under `module_types/` using the module name from `modules.json`.
+For smaller projects, write one `types.txt`. For larger projects, write one file per module under `module_types/`.
+
+Name each module type file with the module name slug, not the raw module name. Build the slug by replacing every character other than ASCII letters, digits, `.`, `_`, and `-` with `_`, then trimming leading/trailing `.`, `_`, and `-`. Examples:
+
+- module `misc/fasttest` -> `module_types/misc_fasttest.txt`
+- module `tools/validate_tool` -> `module_types/tools_validate_tool.txt`
+- module `core` -> `module_types/core.txt`
 
 Describe:
 
@@ -59,6 +65,6 @@ These files are given to spec-writing agents as context. Without them, agents wi
 Before finishing, verify all of the following exist:
 
 - [ ] `fm_agent/spec_prompts/domain_context/engine_overview.txt`
-- [ ] `fm_agent/spec_prompts/domain_context/types.txt` or `fm_agent/spec_prompts/domain_context/module_types/*.txt`
+- [ ] `fm_agent/spec_prompts/domain_context/types.txt` or correctly slugged `fm_agent/spec_prompts/domain_context/module_types/*.txt`
 
 If any file is missing, create it now before ending.

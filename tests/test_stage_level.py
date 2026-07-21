@@ -52,6 +52,62 @@ def test_setup_writes_source_and_modules_manifest(mock_backend, tmp_path):
     )
 
 
+def test_module_type_context_uses_slugged_module_filename(tmp_path):
+    """Module names with slashes map to flat module_types filenames."""
+    work_dir = tmp_path / "fm_agent"
+    domain_dir = work_dir / "spec_prompts" / "domain_context"
+    module_types = domain_dir / "module_types"
+    module_types.mkdir(parents=True)
+    (domain_dir / "engine_overview.txt").write_text("overview\n", encoding="utf-8")
+    (module_types / "misc_fasttest.txt").write_text("types\n", encoding="utf-8")
+    (module_types / "tools_validate_tool.txt").write_text("types\n", encoding="utf-8")
+    (work_dir / "source_files.json").write_text(
+        json.dumps({
+            "project": "proj",
+            "languages": ["JavaScript"],
+            "file_extensions": ["js"],
+            "source_files": ["misc/fasttest.js", "tools/validate_tool.js"],
+        }),
+        encoding="utf-8",
+    )
+    (work_dir / "modules.json").write_text(
+        json.dumps({
+            "project": "proj",
+            "languages": ["JavaScript"],
+            "file_extensions": ["js"],
+            "modules": [
+                {
+                    "name": "misc/fasttest",
+                    "description": "Fast test helpers.",
+                    "source_files": ["misc/fasttest.js"],
+                },
+                {
+                    "name": "tools/validate_tool",
+                    "description": "Validation tool.",
+                    "source_files": ["tools/validate_tool.js"],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    from src.domain_knowledge import (
+        list_generated_domain_context_relpaths,
+        module_type_filename,
+    )
+    from src.pipeline_setup import _domain_context_complete
+
+    assert module_type_filename("misc/fasttest") == "misc_fasttest.txt"
+    assert _domain_context_complete(str(work_dir))
+    assert list_generated_domain_context_relpaths(
+        str(work_dir),
+        "misc/fasttest-js/run.js",
+    ) == [
+        "fm_agent/spec_prompts/domain_context/engine_overview.txt",
+        "fm_agent/spec_prompts/domain_context/module_types/misc_fasttest.txt",
+    ]
+
+
 def test_extraction_uses_source_manifest(mock_backend, tmp_path):
     """Extract functions from source files declared by setup manifests."""
     proj = setup_workspace(
