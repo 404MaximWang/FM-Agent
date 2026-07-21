@@ -426,7 +426,7 @@ def run_pipeline(
             if specs_generated > 0 and not _get_pending_batches(all_batches, proj_dir):
                 break
 
-            if specs_generated > specs_ready_before:
+            if specs_generated > specs_ready_before and attempt < OPENCODE_MAX_RETRIES:
                 new_specs = specs_generated - specs_ready_before
                 logging.info(
                     f"Layer {layer_idx} attempt {attempt}: "
@@ -448,12 +448,21 @@ def run_pipeline(
                 )
                 time.sleep(delay)
             else:
+                pending_after = _get_pending_batches(all_batches, proj_dir)
+                missing_files = []
+                for batch_info in pending_after:
+                    for func_rel in batch_info.get("functions", []):
+                        if not is_file_ready(os.path.join(proj_dir, func_rel)):
+                            missing_files.append(func_rel)
+                missing_count = len(missing_files)
                 print(
                     f"[Pipeline] ERROR: Stage 6 Layer {layer_idx} failed "
                     f"after {OPENCODE_MAX_RETRIES} attempts. "
-                    f"No specs were generated. "
+                    f"{missing_count} function(s) are still missing valid specs. "
                     f"Check {os.path.basename(proj_dir)}/fm_agent/trace/ for details."
                 )
+                for func_rel in missing_files[:20]:
+                    logging.error("Missing spec after retries: %s", func_rel)
                 sys.exit(1)
 
         for rel in layer_files:

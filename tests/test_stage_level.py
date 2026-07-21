@@ -1,6 +1,9 @@
 import json
 import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from tests.helpers import (
     collect_bug_validation_statuses,
@@ -12,6 +15,7 @@ from tests.helpers import (
     setup_workspace,
     GOLDEN,
 )
+from tests.mock_backend import FixtureBackend
 
 
 def _files_equal(dir_a: Path, dir_b: Path):
@@ -173,6 +177,113 @@ def test_global_layers_drive_spec_generation(mock_backend, tmp_path):
         "Extracted function set differs from golden. "
         f"Missing: {expected - actual}; Extra: {actual - expected}"
     )
+
+
+class PartialSpecBackend(FixtureBackend):
+    """Replay setup normally, but intentionally leave some spec batches incomplete."""
+
+    def __init__(self, scenario=None, *, materialize_by_attempt=None):
+        super().__init__(scenario)
+        self.materialize_by_attempt = materialize_by_attempt or {}
+
+    def run_opencode_traced(self, **kwargs):
+        if kwargs.get("stage") != "spec_generation":
+            return super().run_opencode_traced(**kwargs)
+
+        function_ids = kwargs.get("function_ids") or []
+        work_dir = Path(kwargs["work_dir"])
+        self._record_event(
+            stage=kwargs["stage"],
+            function_ids=function_ids,
+            input_files=kwargs.get("input_files"),
+            output_files=kwargs.get("output_files"),
+            summary=kwargs.get("summary"),
+            metadata=kwargs.get("metadata"),
+        )
+
+        attempt = kwargs.get("metadata", {}).get("attempt")
+        count = self.materialize_by_attempt.get(attempt, 0)
+        if count:
+            self._materialize_function_outputs(
+                {
+                    "materialize_by_function_id": {
+                        "kind": "function_file",
+                        "to_root": "extracted_functions",
+                    }
+                },
+                function_ids[:count],
+                work_dir,
+            )
+        return subprocess.CompletedProcess(kwargs["command"], 0)
+
+
+def test_partial_spec_attempt_does_not_drain_unready_files(
+    scenario,
+    tmp_path,
+    monkeypatch,
+):
+    """Post-attempt drain with spec_procs=None must not wait on unspecced files."""
+    proj = setup_workspace(tmp_path)
+    backend = PartialSpecBackend(scenario, materialize_by_attempt={1: 1})
+    drain_calls = []
+
+    import main
+    monkeypatch.setattr(main, "OPENCODE_MAX_RETRIES", 2)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    def fake_streaming_reasoner(
+        input_dir,
+        output_dir,
+        file_list=None,
+        proj_dir=None,
+        work_dir=None,
+        poll_interval=2,
+        spec_procs=None,
+        already_processed=None,
+        resume=False,
+        backend=None,
+    ):
+        del output_dir, proj_dir, work_dir, poll_interval
+        del already_processed, resume, backend
+        if spec_procs is None:
+            from src.file_utils import is_file_ready
+            unready = [
+                rel for rel in file_list or []
+                if not is_file_ready(Path(input_dir) / rel)
+            ]
+            assert not unready
+        drain_calls.append({
+            "file_list": list(file_list or []),
+            "has_spec_procs": spec_procs is not None,
+        })
+        return set()
+
+    monkeypatch.setattr(main, "streaming_reasoner", fake_streaming_reasoner)
+
+    with pytest.raises(SystemExit):
+        main.run_pipeline(str(proj), only_spec=False, backend=backend)
+
+    assert drain_calls
+
+
+def test_spec_generation_fails_when_final_attempt_leaves_pending_specs(
+    scenario,
+    tmp_path,
+    monkeypatch,
+):
+    """A partially successful final attempt must not let the next layer start."""
+    proj = setup_workspace(tmp_path)
+    backend = PartialSpecBackend(
+        scenario,
+        materialize_by_attempt={1: 0, 2: 1},
+    )
+
+    import main
+    monkeypatch.setattr(main, "OPENCODE_MAX_RETRIES", 2)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(SystemExit):
+        main.run_pipeline(str(proj), only_spec=True, backend=backend)
 
 
 def _golden_verified_file_list():
