@@ -667,6 +667,7 @@ def run_incremental_pipeline(
     domain_knowledge_files=None,
     submodules=None,
     extra_call_edges_path=None,
+    plugin_config=None,
     backend=None,
 ):
     """
@@ -721,6 +722,7 @@ def run_incremental_pipeline(
             domain_knowledge_files=domain_knowledge_files,
             submodules=submodules,
             extra_call_edges_path=extra_call_edges_path,
+            plugin_config=plugin_config,
             backend=backend,
         )
         return
@@ -776,6 +778,7 @@ def run_incremental_pipeline(
     _run_setup_extract(
         proj_dir, work_dir, script_dir,
         is_incremental=True, submodules=submodules,
+        plugin_config=plugin_config,
         backend=backend,
     )
     logging.info("  -> setup manifests regenerated.")

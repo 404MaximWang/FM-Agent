@@ -181,6 +181,7 @@ def run_pipeline(
     submodules=None,
     extra_call_edges_path=None,
     only_spec=False,
+    plugin_config=None,
     backend=None,
 ):
     backend = backend or DEFAULT_BACKEND
@@ -229,6 +230,7 @@ def run_pipeline(
         resume=resume,
         required_source_files=required_source_files,
         submodules=submodules,
+        plugin_config=plugin_config,
         backend=backend,
     )
 
@@ -559,7 +561,47 @@ if __name__ == "__main__":
         help="optional JSON file, or directory of JSON files, containing "
         "supplemental caller->callee edges.",
     )
+    parser.add_argument(
+        "--list-plugin",
+        action="store_true",
+        help="list all valid plugins found under the plugins/ directory and exit.",
+    )
+    parser.add_argument(
+        "--plugin",
+        metavar="NAME",
+        default=None,
+        help="load and activate the named plugin from the plugins/ directory.",
+    )
     args = parser.parse_args()
+
+    if args.list_plugin:
+        from pathlib import Path
+        from src.plugin import load_plugins
+        plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+        plugins = load_plugins(Path(plugins_dir))
+        if not plugins:
+            print("No valid plugins found.")
+        else:
+            print(f"{'Plugin':<30} {'Version':<12} Stages")
+            print("-" * 65)
+            for name, plugin in plugins.items():
+                stage_names = ", ".join(plugin.stages.keys()) if plugin.stages else "(none)"
+                print(f"{name:<30} {plugin.version:<12} {stage_names}")
+        sys.exit(0)
+
+    plugin_config = None
+    if args.plugin:
+        if not args.proj_dir:
+            parser.error("the following arguments are required when --plugin is used: proj_dir")
+        from pathlib import Path
+        from src.plugin import load_plugins
+        plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+        plugins = load_plugins(Path(plugins_dir))
+        if args.plugin not in plugins:
+            print(f"[Pipeline] ERROR: Plugin '{args.plugin}' not found or invalid.")
+            sys.exit(1)
+        plugin_config = plugins[args.plugin]
+        print(f"[Pipeline] Loaded plugin '{plugin_config.name}' v{plugin_config.version}")
 
     resume = args.resume or os.environ.get("FM_AGENT_RESUME") == "1"
     proj_dir = os.path.abspath(args.proj_dir)
@@ -609,6 +651,7 @@ if __name__ == "__main__":
             domain_knowledge_files=domain_knowledge_files,
             extra_call_edges_path=extra_call_edges_path,
             only_spec=args.only_spec,
+            plugin_config=plugin_config,
         )
         end_time = time.time()
         logging.info(f"Total time: {end_time - start_time:.2f} seconds")
@@ -666,7 +709,8 @@ if __name__ == "__main__":
                     domain_knowledge_files=domain_knowledge_files,
                     submodules=submodules,
                     extra_call_edges_path=extra_call_edges_path,
-            )
+                    plugin_config=plugin_config,
+                )
             else:
                 run_pipeline(
                     run_dir,
@@ -675,7 +719,8 @@ if __name__ == "__main__":
                     submodules=submodules,
                     extra_call_edges_path=extra_call_edges_path,
                     only_spec=args.only_spec,
-            )
+                    plugin_config=plugin_config,
+                )
             # Record the commit that was processed. Written after the pipeline since
             # it recreates fm_agent/; with --isolate it lives in the snapshot and is
             # copied back to the real project below. Only recorded on success so a

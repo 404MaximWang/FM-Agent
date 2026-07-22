@@ -286,162 +286,250 @@ def _run_generate_source_manifest(
     is_incremental=False,
     resume=False,
     submodules=None,
+    plugin_stage=None,
+    plugin_root=None,
     backend=None,
 ):
     """Stage 1: generate source_files.json and modules.json."""
     backend = backend or DEFAULT_BACKEND
-    resume_skip = resume and _source_manifest_complete(work_dir)
-    if resume_skip:
-        print("[Pipeline] Stage 1/6: RESUME — source/module manifests found, skipping setup manifest generation.")
+    run_llm = True
 
-    _prepare_workflow_file(proj_dir, work_dir, script_dir, "workflow_generate_modules.md")
+    if plugin_stage is not None:
+        if plugin_stage.type == "pass":
+            print("[Pipeline] Stage 1/6: Plugin stage 'generate_module_plan' type=pass, skipping.")
+            run_llm = False
+        elif plugin_stage.type == "replace":
+            print("[Pipeline] Stage 1/6: Plugin stage 'generate_module_plan' type=replace, running plugin command.")
+            from .plugin import run_plugin_command
+            run_plugin_command(plugin_stage.replace_cmd, plugin_root, proj_dir, label="generate_module_plan")
+            run_llm = False
 
-    fm_reminder = (
-        "IMPORTANT: fm_agent/ is your output workspace, not project source. "
-        "Do NOT include fm_agent/ paths in source_files.json or modules.json. "
-        "Do NOT modify existing project files."
-    )
-    incremental_reminder = (
-        "An existing manifest may be present. Update it to reflect the current "
-        "source tree instead of regenerating unrelated entries."
-    )
-    submodule_reminder = ""
-    if submodules:
-        allowed = ", ".join(f"`{submodule}/`" for submodule in submodules)
-        submodule_reminder = (
-            f"Only process source files under these project-relative directories: {allowed}."
-        )
-
-    for attempt in range(1, OPENCODE_MAX_RETRIES + 1):
+    if run_llm:
+        resume_skip = resume and _source_manifest_complete(work_dir)
         if resume_skip:
-            break
-        prompt = (
-            "Follow the instructions in the attached file. "
-            f"{fm_reminder} {submodule_reminder}"
-        )
-        if attempt > 1 or resume:
-            prompt += (
-                " First inspect fm_agent/ and keep any valid existing "
-                "source_files.json/modules.json entries that are still correct."
-            )
-        if is_incremental:
-            prompt += " " + incremental_reminder
+            print("[Pipeline] Stage 1/6: RESUME — source/module manifests found, skipping setup manifest generation.")
 
-        prompt_file = os.path.join(proj_dir, "fm_agent", "workflow_generate_modules.md")
-        command = build_llm_cli_command(
-            model=OPENCODE_SETUP_MODEL,
-            prompt=prompt,
-            cwd=proj_dir,
-            files=[prompt_file],
-        )
-        try:
-            backend.run_opencode_traced(
-                proj_dir=proj_dir,
-                work_dir=work_dir,
-                command=command,
-                stage="generate_source_manifest",
-                input_files=[
-                    "fm_agent/workflow_generate_modules.md",
-                    *list_staged_domain_knowledge_relpaths(work_dir),
-                ],
-                output_files=[
-                    "fm_agent/source_files.json",
-                    "fm_agent/modules.json",
-                ],
-                summary=f"OpenCode generate source/module manifest attempt {attempt}",
-                metadata={"attempt": attempt},
-            )
-        except subprocess.CalledProcessError as exc:
-            logging.warning("Stage 1 attempt %d: opencode exited with code %s", attempt, exc.returncode)
-
-        if _source_manifest_complete(work_dir):
-            break
-
-        if attempt < OPENCODE_MAX_RETRIES:
-            delay = 10
-            print(
-                f"[Pipeline] Stage 1 failed to produce source/module manifests "
-                f"(attempt {attempt}/{OPENCODE_MAX_RETRIES}). Retrying in {delay}s..."
-            )
-            time.sleep(delay)
+        if plugin_stage is not None and plugin_stage.type == "modify" and plugin_stage.input_md:
+            workflow_src = str(plugin_root / plugin_stage.input_md)
+            workflow_dst = os.path.join(work_dir, "workflow_generate_modules.md")
+            shutil.copy2(workflow_src, workflow_dst)
+            user_knowledge_paths = list_staged_domain_knowledge_relpaths(work_dir)
+            if user_knowledge_paths:
+                with open(workflow_dst, "a") as f:
+                    f.write(
+                        "\n---\n\n"
+                        "## User-Provided Domain Knowledge\n\n"
+                        "Read these files as contextual knowledge. Do not include them as "
+                        "project source files and do not edit them in place.\n\n"
+                        f"{format_domain_knowledge_bullets(user_knowledge_paths)}\n"
+                    )
         else:
-            print(
-                f"[Pipeline] ERROR: Stage 1 failed after {OPENCODE_MAX_RETRIES} attempts. "
-                "source_files.json or modules.json missing/invalid."
+            _prepare_workflow_file(proj_dir, work_dir, script_dir, "workflow_generate_modules.md")
+
+        fm_reminder = (
+            "IMPORTANT: fm_agent/ is your output workspace, not project source. "
+            "Do NOT include fm_agent/ paths in source_files.json or modules.json. "
+            "Do NOT modify existing project files."
+        )
+        incremental_reminder = (
+            "An existing manifest may be present. Update it to reflect the current "
+            "source tree instead of regenerating unrelated entries."
+        )
+        submodule_reminder = ""
+        if submodules:
+            allowed = ", ".join(f"`{submodule}/`" for submodule in submodules)
+            submodule_reminder = (
+                f"Only process source files under these project-relative directories: {allowed}."
             )
-            sys.exit(1)
+
+        for attempt in range(1, OPENCODE_MAX_RETRIES + 1):
+            if resume_skip:
+                break
+            prompt = (
+                "Follow the instructions in the attached file. "
+                f"{fm_reminder} {submodule_reminder}"
+            )
+            if attempt > 1 or resume:
+                prompt += (
+                    " First inspect fm_agent/ and keep any valid existing "
+                    "source_files.json/modules.json entries that are still correct."
+                )
+            if is_incremental:
+                prompt += " " + incremental_reminder
+
+            prompt_file = os.path.join(proj_dir, "fm_agent", "workflow_generate_modules.md")
+            command = build_llm_cli_command(
+                model=OPENCODE_SETUP_MODEL,
+                prompt=prompt,
+                cwd=proj_dir,
+                files=[prompt_file],
+            )
+            try:
+                backend.run_opencode_traced(
+                    proj_dir=proj_dir,
+                    work_dir=work_dir,
+                    command=command,
+                    stage="generate_source_manifest",
+                    input_files=[
+                        "fm_agent/workflow_generate_modules.md",
+                        *list_staged_domain_knowledge_relpaths(work_dir),
+                    ],
+                    output_files=[
+                        "fm_agent/source_files.json",
+                        "fm_agent/modules.json",
+                    ],
+                    summary=f"OpenCode generate source/module manifest attempt {attempt}",
+                    metadata={"attempt": attempt},
+                )
+            except subprocess.CalledProcessError as exc:
+                logging.warning("Stage 1 attempt %d: opencode exited with code %s", attempt, exc.returncode)
+
+            if _source_manifest_complete(work_dir):
+                break
+
+            if attempt < OPENCODE_MAX_RETRIES:
+                delay = 10
+                print(
+                    f"[Pipeline] Stage 1 failed to produce source/module manifests "
+                    f"(attempt {attempt}/{OPENCODE_MAX_RETRIES}). Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+            else:
+                print(
+                    f"[Pipeline] ERROR: Stage 1 failed after {OPENCODE_MAX_RETRIES} attempts. "
+                    "source_files.json or modules.json missing/invalid."
+                )
+                sys.exit(1)
+
+        if plugin_stage is not None and plugin_stage.type == "modify" and plugin_stage.output_process:
+            print("[Pipeline] Stage 1/6: Running plugin post-process for generate_module_plan...")
+            from .plugin import run_plugin_command
+            run_plugin_command(plugin_stage.output_process, plugin_root, proj_dir, label="generate_module_plan post-process")
+
+    if not _source_manifest_complete(work_dir):
+        raise RuntimeError(
+            "Stage generate_module_plan failed: source_files.json or modules.json "
+            "is missing or invalid."
+        )
 
 
-def _run_generate_domain_context(proj_dir, work_dir, script_dir, resume=False, backend=None):
+def _run_generate_domain_context(
+    proj_dir,
+    work_dir,
+    script_dir,
+    resume=False,
+    plugin_stage=None,
+    plugin_root=None,
+    backend=None,
+):
     """Stage 2: generate module/global domain context."""
     backend = backend or DEFAULT_BACKEND
-    resume_skip = resume and _domain_context_complete(work_dir)
-    if resume_skip:
-        print("[Pipeline] Stage 2/6: RESUME — domain context found, skipping generation.")
+    run_llm = True
 
-    _prepare_workflow_file(proj_dir, work_dir, script_dir, "workflow_generate_domain_context.md")
-    fm_reminder = (
-        "IMPORTANT: fm_agent/ is your output workspace, not project source. "
-        "Do NOT modify existing project files."
-    )
+    if plugin_stage is not None:
+        if plugin_stage.type == "pass":
+            print("[Pipeline] Stage 2/6: Plugin stage 'generate_domain_context' type=pass, skipping.")
+            run_llm = False
+        elif plugin_stage.type == "replace":
+            print("[Pipeline] Stage 2/6: Plugin stage 'generate_domain_context' type=replace, running plugin command.")
+            from .plugin import run_plugin_command
+            run_plugin_command(plugin_stage.replace_cmd, plugin_root, proj_dir, label="generate_domain_context")
+            run_llm = False
 
-    for attempt in range(1, OPENCODE_MAX_RETRIES + 1):
+    if run_llm:
+        resume_skip = resume and _domain_context_complete(work_dir)
         if resume_skip:
-            break
-        prompt = (
-            "Read fm_agent/source_files.json and fm_agent/modules.json first. "
-            "Then follow the instructions in the attached file. "
-            f"{fm_reminder}"
-        )
-        if attempt > 1 or resume:
-            prompt += (
-                " Keep any existing valid domain context files and only fill "
-                "missing or incomplete outputs."
-            )
-        prompt_file = os.path.join(proj_dir, "fm_agent", "workflow_generate_domain_context.md")
-        command = build_llm_cli_command(
-            model=OPENCODE_SETUP_MODEL,
-            prompt=prompt,
-            cwd=proj_dir,
-            files=[prompt_file],
-        )
-        try:
-            backend.run_opencode_traced(
-                proj_dir=proj_dir,
-                work_dir=work_dir,
-                command=command,
-                stage="generate_domain_context",
-                input_files=[
-                    "fm_agent/workflow_generate_domain_context.md",
-                    "fm_agent/source_files.json",
-                    "fm_agent/modules.json",
-                    *list_staged_domain_knowledge_relpaths(work_dir),
-                ],
-                output_files=[
-                    "fm_agent/spec_prompts/domain_context/engine_overview.txt",
-                ],
-                summary=f"OpenCode generate domain context attempt {attempt}",
-                metadata={"attempt": attempt},
-            )
-        except subprocess.CalledProcessError as exc:
-            logging.warning("Stage 2 attempt %d: opencode exited with code %s", attempt, exc.returncode)
+            print("[Pipeline] Stage 2/6: RESUME — domain context found, skipping generation.")
 
-        if _domain_context_complete(work_dir):
-            break
-
-        if attempt < OPENCODE_MAX_RETRIES:
-            delay = 10
-            print(
-                f"[Pipeline] Stage 2 failed to produce domain context "
-                f"(attempt {attempt}/{OPENCODE_MAX_RETRIES}). Retrying in {delay}s..."
-            )
-            time.sleep(delay)
+        if plugin_stage is not None and plugin_stage.type == "modify" and plugin_stage.input_md:
+            workflow_src = str(plugin_root / plugin_stage.input_md)
+            workflow_dst = os.path.join(work_dir, "workflow_generate_domain_context.md")
+            shutil.copy2(workflow_src, workflow_dst)
+            user_knowledge_paths = list_staged_domain_knowledge_relpaths(work_dir)
+            if user_knowledge_paths:
+                with open(workflow_dst, "a") as f:
+                    f.write(
+                        "\n---\n\n"
+                        "## User-Provided Domain Knowledge\n\n"
+                        "Read these files as contextual knowledge. Do not include them as "
+                        "project source files and do not edit them in place.\n\n"
+                        f"{format_domain_knowledge_bullets(user_knowledge_paths)}\n"
+                    )
         else:
-            print(
-                f"[Pipeline] ERROR: Stage 2 failed after {OPENCODE_MAX_RETRIES} attempts. "
-                "Domain context outputs missing."
+            _prepare_workflow_file(proj_dir, work_dir, script_dir, "workflow_generate_domain_context.md")
+        fm_reminder = (
+            "IMPORTANT: fm_agent/ is your output workspace, not project source. "
+            "Do NOT modify existing project files."
+        )
+
+        for attempt in range(1, OPENCODE_MAX_RETRIES + 1):
+            if resume_skip:
+                break
+            prompt = (
+                "Read fm_agent/source_files.json and fm_agent/modules.json first. "
+                "Then follow the instructions in the attached file. "
+                f"{fm_reminder}"
             )
-            sys.exit(1)
+            if attempt > 1 or resume:
+                prompt += (
+                    " Keep any existing valid domain context files and only fill "
+                    "missing or incomplete outputs."
+                )
+            prompt_file = os.path.join(proj_dir, "fm_agent", "workflow_generate_domain_context.md")
+            command = build_llm_cli_command(
+                model=OPENCODE_SETUP_MODEL,
+                prompt=prompt,
+                cwd=proj_dir,
+                files=[prompt_file],
+            )
+            try:
+                backend.run_opencode_traced(
+                    proj_dir=proj_dir,
+                    work_dir=work_dir,
+                    command=command,
+                    stage="generate_domain_context",
+                    input_files=[
+                        "fm_agent/workflow_generate_domain_context.md",
+                        "fm_agent/source_files.json",
+                        "fm_agent/modules.json",
+                        *list_staged_domain_knowledge_relpaths(work_dir),
+                    ],
+                    output_files=[
+                        "fm_agent/spec_prompts/domain_context/engine_overview.txt",
+                    ],
+                    summary=f"OpenCode generate domain context attempt {attempt}",
+                    metadata={"attempt": attempt},
+                )
+            except subprocess.CalledProcessError as exc:
+                logging.warning("Stage 2 attempt %d: opencode exited with code %s", attempt, exc.returncode)
+
+            if _domain_context_complete(work_dir):
+                break
+
+            if attempt < OPENCODE_MAX_RETRIES:
+                delay = 10
+                print(
+                    f"[Pipeline] Stage 2 failed to produce domain context "
+                    f"(attempt {attempt}/{OPENCODE_MAX_RETRIES}). Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+            else:
+                print(
+                    f"[Pipeline] ERROR: Stage 2 failed after {OPENCODE_MAX_RETRIES} attempts. "
+                    "Domain context outputs missing."
+                )
+                sys.exit(1)
+
+        if plugin_stage is not None and plugin_stage.type == "modify" and plugin_stage.output_process:
+            print("[Pipeline] Stage 2/6: Running plugin post-process for generate_domain_context...")
+            from .plugin import run_plugin_command
+            run_plugin_command(plugin_stage.output_process, plugin_root, proj_dir, label="generate_domain_context post-process")
+
+    if not _domain_context_complete(work_dir):
+        raise RuntimeError(
+            "Stage generate_domain_context failed: domain context output files "
+            "are missing or incomplete."
+        )
 
 
 def _run_setup_extract(
@@ -452,9 +540,14 @@ def _run_setup_extract(
     resume=False,
     required_source_files=None,
     submodules=None,
+    plugin_config=None,
     backend=None,
 ):
     """Run setup manifest generation, post-processing, and domain context."""
+    module_stage = plugin_config.get_stage("generate_module_plan") if plugin_config else None
+    context_stage = plugin_config.get_stage("generate_domain_context") if plugin_config else None
+    plugin_root = plugin_config.root if plugin_config else None
+
     _run_generate_source_manifest(
         proj_dir,
         work_dir,
@@ -462,6 +555,8 @@ def _run_setup_extract(
         is_incremental=is_incremental,
         resume=resume,
         submodules=submodules,
+        plugin_stage=module_stage,
+        plugin_root=plugin_root,
         backend=backend,
     )
     manifests_modified = _post_process_source_manifest(
@@ -476,6 +571,8 @@ def _run_setup_extract(
         work_dir,
         script_dir,
         resume=resume and not manifests_modified,
+        plugin_stage=context_stage,
+        plugin_root=plugin_root,
         backend=backend,
     )
 
