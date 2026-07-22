@@ -984,7 +984,10 @@ def _validate_module_selection(data):
         name = item.get("name")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"module-selection item {index} requires non-empty string field: name")
-        validated.append({"name": name.strip()})
+        module_index = item.get("index")
+        if isinstance(module_index, bool) or not isinstance(module_index, int):
+            raise ValueError(f"module-selection item {index} requires integer field: index")
+        validated.append({"index": module_index, "name": name.strip()})
     return validated
 
 
@@ -1062,6 +1065,23 @@ def _domain_knowledge_prompt_section(work_dir):
     return f"## User-provided domain knowledge\n\n{text}\n\n" if text else ""
 
 
+def _no_callees_info_block(comment_prefix):
+    return (
+        f"{comment_prefix} [INFO]\n"
+        f"{comment_prefix} (no callees)\n"
+        f"{comment_prefix} [INFO]"
+    )
+
+
+def _changed_functions_for_source(proj_dir, src_rel, changed_functions):
+    abs_src = os.path.abspath(os.path.join(proj_dir, src_rel))
+    changes = changed_functions.get(abs_src, {})
+    names = []
+    for key in ("added", "modified"):
+        names.extend(changes.get(key, []))
+    return names
+
+
 def collect_relevent_function_scope(
     proj_dir, developer_intent, changed_functions, range=None, backend=None
 ):
@@ -1106,17 +1126,19 @@ def collect_relevent_function_scope(
     }
     logging.info("    [scope] pass 1/3: selecting relevant modules from %d module(s)...", len(modules))
 
+    indexed_modules = list(enumerate(modules))
+
     # Pass 1: module selection. Inline the catalog and make a direct LLM call
     # that returns the selection as JSON.
     module_catalog = "\n".join(
-        f"- name `{module.get('name', '(unnamed)')}`: "
+        f"- index {index}, name `{module.get('name', '(unnamed)')}`: "
         f"{(module.get('description') or '').strip() or '(no description)'}"
-        for module in modules
+        for index, module in indexed_modules
     )
     module_prompt = (
         "# Select Relevant Modules\n\n"
         "You are triaging which parts of a codebase are relevant to a developer's intent.\n\n"
-        "Each module below has a `name` and a `description`. Using each module's "
+        "Each module below has an `index`, a `name`, and a `description`. Using each module's "
         "description, decide which modules are relevant to the developer intent — a "
         "module is relevant if the developer intent is likely to affect it or depend on it.\n\n"
         "## Modules\n\n"
@@ -1125,28 +1147,29 @@ def collect_relevent_function_scope(
         f"{developer_intent}\n\n"
         "## Output\n\n"
         "Return ONLY a JSON array of objects, each "
-        '`{"name": "<module name>"}`, naming exactly the modules you judged relevant. Use '
-        "`[]` if no module is relevant. Do not include Markdown, tags, or prose outside the JSON array.\n"
+        '`{"index": <module index>, "name": "<module name>"}`, naming exactly the modules '
+        "you judged relevant (reuse the same `index` and `name` values from the list above). "
+        "Use `[]` if no module is relevant. Do not include Markdown, tags, or prose outside the JSON array.\n"
     )
     selection = _llm_select_json(
         work_dir,
         module_prompt,
         stage="select_relevant_modules",
         validator=_validate_module_selection,
-        schema_description='[{"name": "non-empty string"}]',
+        schema_description='[{"index": integer, "name": "non-empty string"}]',
     )
     if selection is None:
         selection = []
 
-    selected_keys = set()
+    selected_indices = set()
     if isinstance(selection, list):
         for item in selection:
-            if isinstance(item, dict) and "name" in item:
-                selected_keys.add(item["name"])
+            if isinstance(item, dict) and "index" in item:
+                selected_indices.add(item["index"])
 
     relevant_modules = [
-        module for module in modules
-        if module.get("name") in selected_keys
+        module for index, module in indexed_modules
+        if index in selected_indices
         or any(sf.replace("\\", "/") in changed_source_rels for sf in module.get("source_files", []))
     ]
     if not relevant_modules:
@@ -1280,6 +1303,14 @@ def collect_relevent_function_scope(
                     )
                     for cand in cands:
                         _record(os.path.relpath(cand, extracted_dir), f.get("score", 0.0))
+                for changed_name in _changed_functions_for_source(
+                    proj_dir, src_rel, changed_functions
+                ):
+                    cands = by_method.get(changed_name) or by_method.get(
+                        re.sub(r"_\d+$", "", changed_name), []
+                    )
+                    for cand in cands:
+                        _record(os.path.relpath(cand, extracted_dir), 0.0)
                 logging.info(
                     "    [scope] pass 3/3: %s -> %s",
                     src_rel,
@@ -1605,7 +1636,12 @@ def _opencode_generate_spec(proj_dir, work_dir, idx, fqn, lang_key, comment_pref
             "list the names of the callees you recorded.\n"
         )
     else:
-        info_step = f"{info_step_number}. This function has no callees, so produce no [INFO] block.\n"
+        no_callees_info = _no_callees_info_block(comment_prefix)
+        info_step = (
+            f"{info_step_number}. This function has no callees. Still produce this COMPLETE [INFO] block so "
+            "the file remains in the standard ready format:\n"
+            f"{no_callees_info}\n"
+        )
 
     prompt_content = (
         "# Generate Function Specification\n\n"
@@ -1632,7 +1668,7 @@ def _opencode_generate_spec(proj_dir, work_dir, idx, fqn, lang_key, comment_pref
         '   - "spec_updated": boolean — true when you produced a [SPEC] block.\n'
         '   - "new_spec": string — the full [SPEC] block.\n'
         '   - "info_updated": boolean — true when you produced an [INFO] block.\n'
-        '   - "new_info": string — the full [INFO] block, or "" if none.\n'
+        '   - "new_info": string — the full [INFO] block.\n'
         '   - "updated_callees": array of callee name strings recorded in [INFO], or [].\n'
         "   Write ONLY that JSON file; do not modify any other project files.\n"
     )
@@ -1775,6 +1811,8 @@ def _update_specs_for_intent(
             # Freshly generated: take the [INFO] block opencode produced (if any). Treat it as
             # "updated" so its recorded callee expectations propagate downward below.
             new_info = (result.get("new_info") or "").strip()
+            if not new_info and not callee_names:
+                new_info = _no_callees_info_block(comment_prefix)
             info_block = new_info or None
             info_updated = bool(new_info)
         else:
