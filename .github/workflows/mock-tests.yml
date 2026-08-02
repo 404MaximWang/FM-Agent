@@ -1,0 +1,20 @@
+name: FM-Agent Mock Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  replay-mock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run replay mock integration test
+        run: uv run pytest tests/test_replay_mock.py -v
